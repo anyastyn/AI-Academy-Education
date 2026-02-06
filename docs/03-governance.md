@@ -115,3 +115,130 @@ To prevent unsafe recommendations:
 | Change & Evolution     | Lifecycle Management       |
 | Ownership & Kill Switch| Operations                 |
 | Confidence Thresholds  | Safety & Routing            |
+
+##10. Governance Gaps Identified During Agent Design
+
+The following gaps were identified during the design and testing of the Power Automate Helper Agent. Each gap includes a concrete mitigation aligned with AI Academy governance principles.
+
+1. Gap: Sensitive data stored in memory
+
+Risk:
+Storing full Power Automate flow JSON indefinitely may expose sensitive configuration details and increase data risk.
+
+Mitigation:
+Limit what is stored in memory.
+
+Implementation:
+
+Do not store full flow JSON long-term.
+
+Before saving to memory, keep only:
+
+Flow name
+
+Trigger type
+
+Connectors used
+
+Detected issues (text only)
+
+Beginner rule:
+👉 Store summaries, not raw data.
+
+2. Gap: No data retention limit
+
+Risk:
+Keeping agent memory forever increases security and compliance risk.
+
+Mitigation:
+Define and enforce a retention rule.
+
+Implementation:
+
+Define a clear policy, for example:
+
+“Delete agent messages after 30 or 90 days”
+
+Enforce at database level using:
+
+Supabase scheduled cleanup job, or
+
+Retention policy in SQL
+
+Beginner rule:
+👉 If data is no longer useful, delete it.
+
+3. Gap: Users may trust AI output too much
+
+Risk:
+Users may apply recommendations directly to production systems without sufficient review.
+
+Mitigation:
+Enforce mandatory human review.
+
+Implementation:
+
+Clearly state in documentation and UI:
+
+“AI output must be reviewed before production use”
+
+Encourage a human checklist:
+
+Were permissions reviewed?
+
+Was the change tested in a dev environment?
+
+Does it comply with governance rules?
+
+Beginner rule:
+👉 AI suggests — humans decide.
+
+4. Gap: “Do not ask for secrets” enforced only by rules
+
+Risk:
+Written rules alone are not sufficient to prevent unsafe behavior.
+
+Mitigation:
+Add technical guardrails.
+
+Implementation:
+
+Add keyword blocking in agent logic for:
+
+passwords
+
+tokens
+
+API keys
+
+client secrets
+
+If such terms are detected:
+
+Agent refuses the request
+
+Agent explains why it cannot proceed
+
+Beginner rule:
+👉 Don’t rely only on rules — enforce them with code.
+
+5. Gap: Kill switch depends on a single owner
+
+Risk:
+If the owner is unavailable, the agent cannot be disabled quickly.
+
+Mitigation:
+Introduce backup control.
+
+Implementation:
+
+Assign at least one additional trusted person who can:
+
+Revoke Supabase database access
+
+Disable or rotate API keys
+
+Document this clearly as an Emergency Stop Procedure
+
+Beginner rule:
+👉 Never rely on a single person for shutdown.
