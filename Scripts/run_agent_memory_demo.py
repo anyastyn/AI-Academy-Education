@@ -1,16 +1,19 @@
-import os, requests
+import os, re, requests
 from dotenv import load_dotenv
+from openai import OpenAI
 
 load_dotenv()
-
-
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SERVICE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 USER_ID = os.getenv("USER_ID")
-print("SUPABASE_URL =", SUPABASE_URL)
-print("KEY starts with =", (SERVICE_KEY or "")[:8])
-print("USER_ID =", USER_ID)
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+if not all([SUPABASE_URL, SERVICE_KEY, USER_ID, OPENAI_API_KEY]):
+    raise SystemExit("Missing env vars: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, USER_ID, OPENAI_API_KEY")
+
+client = OpenAI(api_key=OPENAI_API_KEY)
+
 headers = {
     "apikey": SERVICE_KEY,
     "Authorization": f"Bearer {SERVICE_KEY}",
@@ -18,14 +21,17 @@ headers = {
     "Prefer": "return=representation",
 }
 
-AGENT_INSTRUCTIONS = """You are a Power Automate helper and optimizer.
-You must output:
-1) What the flow does
-2) Problems found (what + why)
-3) Exact fixes (settings / expressions)
-4) Questions needed (max 4)
-Rules: advisory only, no secrets, no bypass, be practical.
-"""
+# --- Secret detection (simple) ---
+SECRET_PATTERNS = [
+    r"sk-[A-Za-z0-9]{10,}",
+    r"Authorization:\s*Bearer\s+\S+",
+    r"client_secret\s*[:=]\s*\S+",
+    r"password\s*[:=]\s*\S+",
+    r"api[_-]?key\s*[:=]\s*\S+",
+]
+
+def contains_secret(text: str) -> bool:
+    return any(re.search(p, text or "", re.IGNORECASE) for p in SECRET_PATTERNS)
 
 def rpc(fn_name: str, payload: dict):
     url = f"{SUPABASE_URL}/rest/v1/rpc/{fn_name}"
@@ -33,71 +39,138 @@ def rpc(fn_name: str, payload: dict):
     r.raise_for_status()
     return r.json()
 
-def insert_message(role: str, content: str, metadata=None):
-    url = f"{SUPABASE_URL}/rest/v1/messages"
-    body = [{
-        "user_id": USER_ID,
-        "role": role,
-        "content": content,
-        "metadata": metadata or {}
-    }]
-    r = requests.post(url, headers=headers, json=body, timeout=60)
+def insert_row(table: str, row: dict) -> dict:
+    url = f"{SUPABASE_URL}/rest/v1/{table}"
+    r = requests.post(url, headers=headers, json=[row], timeout=60)
     r.raise_for_status()
-    return r.json()[0]["id"]
+    return r.json()[0]
 
-def build_context(question: str):
-    # uses your function: search_user_messages(search_query, user_uuid, max_results)
-    memories = rpc("search_user_messages", {
-        "search_query": question,
-        "user_uuid": USER_ID,
-        "max_results": 5
-    })
+def build_user_memory(query: str) -> str:
+    try:
+        memories = rpc("search_user_messages", {
+            "search_query": query,
+            "user_uuid": USER_ID,
+            "max_results": 5
+        })
+    except Exception:
+        return "(memory search failed)"
 
     if not memories:
-        return "(no relevant memories found)"
+        return "(no relevant user memory found)"
 
-    # keep small
     lines = []
     for m in memories:
-        c = (m.get("content") or "")[:300].replace("\n", " ")
+        c = (m.get("content") or "")[:350].replace("\n", " ")
         lines.append("- " + c)
     return "\n".join(lines)
 
+def embed_query(text: str):
+    emb = client.embeddings.create(model="text-embedding-3-small", input=[text])
+    return emb.data[0].embedding
+
+def search_docs(query: str) -> str:
+    """
+    Day7 document RAG:
+    - embed the query
+    - retrieve top knowledge chunks from Supabase
+    """
+    try:
+        q_emb = embed_query(query)
+        chunks = rpc("search_knowledge_chunks", {
+            "query_embedding": q_emb,
+            "match_count": 5
+        })
+    except Exception:
+        return "(doc search failed — did you run the Day7 SQL in Supabase?)"
+
+    if not chunks:
+        return "(no relevant docs found)"
+
+    out = []
+    for c in chunks:
+        txt = (c.get("content") or "")[:500].replace("\n", " ")
+        score = c.get("score")
+        out.append(f"- (score {score:.3f}) {txt}" if score is not None else f"- {txt}")
+    return "\n".join(out)
+
+def load_system_prompt() -> str:
+    path = os.path.join("docs", "04-agent-prompt.md")
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
+
 def main():
-    print("=== Power Automate Helper Agent (Memory Demo) ===")
-    question = input("Ask your question: ").strip()
+    print("=== Power Automate Helper Agent (OpenAI + Supabase + Day7 RAG) ===")
+    user_input = input("Paste flow JSON or ask a question: ").strip()
 
-    # 1) store user message
-    qid = insert_message("user", question, {"type": "agent_input"})
-    print("Saved user message:", qid)
+    # Create session row
+    session = insert_row("sessions", {"user_id": USER_ID, "metadata": {"channel": "cli"}})
+    session_id = session["id"]
 
-    # 2) retrieve memory
-    context = build_context(question)
+    # Secret protection
+    if contains_secret(user_input):
+        print("\n⚠️ Your input looks like it contains a secret (token/password/key).")
+        print("Please redact it and paste again. I will not store or process secrets.\n")
+        insert_row("messages", {
+            "user_id": USER_ID,
+            "session_id": session_id,
+            "role": "user",
+            "content": "[REDACTED: secret detected]",
+            "metadata": {"secret_detected": True}
+        })
+        return
 
-    # 3) create the prompt (this is what would be sent to an LLM)
-    prompt = f"""{AGENT_INSTRUCTIONS}
+    # Save user message
+    insert_row("messages", {
+        "user_id": USER_ID,
+        "session_id": session_id,
+        "role": "user",
+        "content": user_input,
+        "metadata": {"type": "agent_input", "mode": "review"}
+    })
 
-Relevant memory from Supabase:
-{context}
+    # Retrieve context
+    user_memory = build_user_memory(user_input)
+    doc_context = search_docs(user_input)
 
-User question:
-{question}
-"""
+    system_prompt = load_system_prompt()
 
-    print("\n--- PROMPT PREVIEW (what an LLM would receive) ---\n")
-    print(prompt[:2000])
-    print("\n--- END PREVIEW ---\n")
+    # Call LLM
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"""User memory:
+{user_memory}
 
-    # 4) placeholder "agent response"
-    answer = (
-        "DEMO MODE: memory retrieval + logging works.\n"
-        "Next step: connect an LLM (Azure/OpenAI) to generate real recommendations.\n"
-        "The prompt above shows that the agent receives memory context.\n"
+Document context (RAG from 'RAG Data'):
+{doc_context}
+
+User input:
+{user_input}
+"""}
+    ]
+
+    resp = client.chat.completions.create(
+        model="gpt-5-nano",
+        messages=messages
     )
+    answer = resp.choices[0].message.content
 
-    # 5) store agent output
-    aid = insert_message("assistant", answer, {"type": "agent_output", "mode": "demo"})
-    print("Saved agent output:", aid)
+    print("\n--- ANSWER ---\n")
+    print(answer)
+
+    # Save assistant message
+    insert_row("messages", {
+        "user_id": USER_ID,
+        "session_id": session_id,
+        "role": "assistant",
+        "content": answer,
+        "metadata": {
+            "type": "agent_output",
+            "mode": "review",
+            "model": "gpt-5-nano",
+            "used_user_memory": True,
+            "used_doc_rag": True
+        }
+    })
 
 if __name__ == "__main__":
     main()
