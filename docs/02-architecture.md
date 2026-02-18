@@ -1,104 +1,144 @@
-# Architecture – Power Automate Helper Agent (Week 1 + Day 7 RAG)
+# Architecture — Power Automate Flow Reviewer & Governance Agent
 
-## Goal (simple)
-An advisory agent that reviews Power Automate flows and suggests improvements.
-It uses:
-- Memory (Supabase messages)
-- Document RAG (Day 7: retrieve from docs)
-- LLM (OpenAI) to generate the final answer
-- Governance guardrails (no secrets, no bypass, humans decide)
+## 1. Purpose
 
----
+This agent is an advisory system used by a single customer tenant.
 
-## Components
-1) **User**
-   - Pastes flow JSON export or description (+ optional screenshots/logs)
+It:
+- Reviews Power Automate flow JSON exports
+- Identifies optimization issues (performance, reliability, maintainability)
+- Checks governance compliance (connectors, DLP, environments, ARB)
+- Provides clear, actionable recommendations
+- Never executes changes
 
-2) **Agent**
-   - Runs Planning + ReAct reasoning flow
-   - Calls tools:
-     - Supabase search in messages (memory)
-     - Supabase search in knowledge docs (document RAG)
-     - LLM for final response
-
-3) **Supabase**
-   - `sessions`: groups a conversation
-   - `messages`: saves user and assistant turns + embeddings
-   - `user_facts`: saves small stable facts (optional)
-   - `knowledge_documents` + `knowledge_chunks`: shared docs (Day 7 RAG)
-
-4) **OpenAI**
-   - Chat model: generates structured recommendations
-   - Embedding model: creates embeddings for semantic search
+It is a bounded, monitored, retrieval-grounded AI system.
 
 ---
 
-## What gets saved to Supabase (and when)
-### sessions
-- Create at start of a chat run
-- Update ended_at at end (optional)
+## 2. High-Level Architecture
 
-### messages
-- Save every user input and assistant output
-- Attach session_id
-- Save embeddings later (batch script) or immediately
-
-### user_facts (optional learning)
-- After assistant response:
-  - extract 1–3 stable facts (preferences/common connectors)
-  - upsert into user_facts
-
-### knowledge_documents + knowledge_chunks (Day 7)
-- Ingest docs once (chunk + embed + store)
-- Reuse for all users (shared KB)
+User  
+→ Agent Runtime  
+→ RAG Retrieval (Supabase)  
+→ LLM (OpenAI)  
+→ Structured Advisory Response  
+→ Logging (Supabase)
 
 ---
 
-## Agent workflow (this is the “algorithm” reviewers want)
+## 3. Components
 
-### 0) Safety input check
-- Scan for secrets/tokens/passwords
-- If found: stop, warn user, do NOT store raw text
+### 3.1 User
+- Provides flow JSON export, description, or governance question
+- Operates inside one tenant context
 
-### 1) Planning (Planning pattern)
-Agent prints the plan (6 steps):
-1) Inputs check
-2) Trigger & filtering
-3) Connectors & throttling
-4) Loops & concurrency
-5) Error handling & reliability
-6) Governance + final recommendations + confidence
+### 3.2 Agent Runtime (Python)
+Responsible for:
+- Input validation
+- Mode detection (Q&A vs Flow Review)
+- Secret scanning
+- Prompt injection detection
+- Out-of-scope detection
+- Retrieval confidence gating
+- Logging and audit metadata
 
-### 2) ReAct execution (ReAct pattern)
-For each plan step:
-- Parse: extract relevant fields from JSON/description
-- Retrieve:
-  - user memory from messages (search_user_messages)
-  - doc chunks from knowledge base (search_knowledge_chunks)
-- Reason: apply checks and create findings
-- If key info missing or confidence < 70: ask up to 4 questions and STOP
+### 3.3 Supabase (Tenant Data Layer)
 
-### 3) Generation (LLM)
-Send to the LLM:
-- system prompt (rules + output format)
-- retrieved context (memory + doc chunks)
-- user input
+Tables:
+- `sessions` — conversation grouping
+- `messages` — all inputs/outputs + metadata
+- `user_facts` — stable reusable preferences (optional)
+- `knowledge_documents` — approved governance documents
+- `knowledge_chunks` — embedded document chunks for retrieval
 
-LLM returns:
-- Findings (what + why)
-- Fixes (exact settings and examples)
-- Questions (if needed)
-- Confidence + human review checklist
+### 3.4 AI Core (OpenAI)
 
-### 4) Logging
-Save:
-- user input (or redacted placeholder)
-- assistant answer
-- metadata: confidence + retrieval info + secret flag
+- Embedding model → creates vector embeddings
+- Chat model → generates structured, grounded answers
+
+LLM always receives:
+- System rules (04-agent-prompt.md)
+- Retrieved governance context
+- User memory context
+- User input
 
 ---
 
-## Day 7 match
-Day 7 RAG pipeline = load docs → chunk → embed → store → retrieve → generate. :contentReference[oaicite:3]{index=3}
-We implement the same, but store vectors in Supabase instead of ChromaDB. :contentReference[oaicite:4]{index=4}
+## 4. Runtime Safety Pipeline
 
+1. Input classification
+   - Detect JSON (flow review) vs simple governance question
+
+2. Security scan
+   - Secret detection (tokens/passwords)
+   - Prompt injection detection
+   - Document exfiltration attempts
+
+3. Scope enforcement
+   - Refuse non–Power Automate topics
+
+4. Retrieval (RAG)
+   - Vector search over tenant governance docs
+   - Optional keyword boost
+   - Top-K chunks returned
+
+5. Confidence gate
+   - If top retrieval score < threshold → abstain
+   - Prevent hallucination
+
+6. Response generation
+   - Q&A mode → short grounded answer
+   - Flow Review mode → structured optimization report
+
+7. Logging
+   - Store input, output
+   - Store event_type (if triggered)
+   - Store top_score + threshold
+   - Store mode (Q&A or Flow Review)
+
+---
+
+## 5. Optimization Checklist (Flow Review Mode)
+
+The agent evaluates flows across 5 categories:
+
+1. Performance
+   - Pagination
+   - Unnecessary loops
+   - Large arrays
+
+2. Reliability
+   - Scopes
+   - Run-after handling
+   - Retry configuration
+
+3. Cost & Throttling
+   - Connector limits
+   - Concurrency
+   - High-volume triggers
+
+4. Maintainability
+   - Naming
+   - Modularity
+   - Variable reuse
+
+5. Governance
+   - Approved connectors
+   - ARB requirements
+   - Environment usage rules
+
+---
+
+## 6. Monitoring & AgentOps
+
+Post-deployment monitoring includes:
+
+- Golden test set evaluation
+- Retrieval pass rate
+- Faithfulness / relevance scoring
+- Safety event logging
+- Latency tracking
+- Document freshness checks
+
+Release gate:
+If golden test set fails threshold → do not release updated version.

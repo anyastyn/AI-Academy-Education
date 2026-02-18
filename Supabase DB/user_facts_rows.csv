@@ -1,3 +1,0 @@
-id,user_id,fact_type,fact_value,confidence,metadata,created_at,updated_at
-33afb99e-cc2f-4d2d-8d52-6b8219013879,1076c969-d000-405e-aa8e-0ad087ca5842,preferred_language,en,0.5,{},2026-02-04 17:38:30.787933+00,2026-02-04 17:38:30.787933+00
-a6bfc59f-09f7-423d-8762-f986ac0d1d20,ee3f0dd9-5258-4f32-9f76-b92b5f3407f8,preferred_language,pl,0.5,{},2026-02-04 17:38:30.787933+00,2026-02-04 17:38:30.787933+00
